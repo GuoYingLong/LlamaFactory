@@ -441,8 +441,30 @@ class SwanLabArguments:
 
 
 @dataclass
+class WebhookArguments:
+    r"""Arguments pertaining to the HTTP webhook callback."""
+
+    webhook_url: str | None = field(
+        default=None,
+        metadata={"help": "The HTTP webhook URL to POST training status to."},
+    )
+    webhook_events: list[str] = field(
+        default_factory=lambda: ["on_train_end"],
+        metadata={
+            "help": "Which events trigger the webhook. "
+            "Available: on_train_begin, on_train_end, on_epoch_end, on_log, on_save, on_evaluate."
+        },
+    )
+    webhook_secret: str | None = field(
+        default=None,
+        metadata={"help": "Optional HMAC-SHA256 secret for signing webhook requests."},
+    )
+
+
+@dataclass
 class FinetuningArguments(
     SwanLabArguments,
+    WebhookArguments,
     BAdamArgument,
     ApolloArguments,
     GaloreArguments,

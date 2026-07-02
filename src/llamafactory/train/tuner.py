@@ -33,6 +33,7 @@ from ..extras.packages import (
 from ..hparams import RayArguments, get_infer_args, get_ray_args, get_train_args, read_args
 from ..model import load_model, load_tokenizer
 from .callbacks import (
+    HttpWebhookCallback,
     LogCallback,
     ModuleProfilerCallback,
     PissaConvertCallback,
@@ -76,6 +77,15 @@ def _training_function(config: dict[str, Any]) -> None:
 
     if finetuning_args.use_swanlab:
         callbacks.append(get_swanlab_callback(finetuning_args))
+
+    if finetuning_args.webhook_url is not None:
+        callbacks.append(
+            HttpWebhookCallback(
+                webhook_url=finetuning_args.webhook_url,
+                webhook_events=finetuning_args.webhook_events,
+                webhook_secret=finetuning_args.webhook_secret,
+            )
+        )
 
     if finetuning_args.early_stopping_steps is not None:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=finetuning_args.early_stopping_steps))

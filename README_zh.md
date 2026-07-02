@@ -815,6 +815,54 @@ swanlab_run_name: test_run # 可选
 方式二：将环境变量 `SWANLAB_API_KEY` 设置为你的 [API 密钥](https://swanlab.cn/settings)。
 方式三：启动前使用 `swanlab login` 命令完成登录。
 
+### 使用 HTTP Webhook 回调
+
+通过 HTTP webhook 实时接收训练状态，用于通知 CI/CD 流水线、即时通讯机器人或监控系统。在 yaml 文件中添加下列参数即可。
+
+```yaml
+webhook_url: "https://your-server.com/api/training-callback"
+webhook_events: ["on_train_end"]  # 默认：["on_train_end"]
+webhook_secret: null              # 可选，HMAC-SHA256 签名密钥
+```
+
+**可用事件：**
+
+| 事件 | 触发时机 |
+|---|---|
+| `on_train_begin` | 训练开始 |
+| `on_epoch_end` | 每个 epoch 结束 |
+| `on_step_end` | 每个 step 结束 |
+| `on_log` | 每次记录日志（由 `logging_steps` 控制） |
+| `on_save` | 保存 checkpoint |
+| `on_evaluate` | 评估结束 |
+| `on_train_end` | 训练结束（默认） |
+
+在 `on_train_end` 时，JSON 载荷中额外包含 `status` 字段：
+
+- `"completed"` — 训练正常完成（日志中有 `train_runtime`）。
+- `"interrupted"` — 训练被异常、`Ctrl+C` 或 `SIGTERM` 中断（无 `train_runtime`）。
+
+载荷示例：
+
+```json
+{
+  "event": "on_train_end",
+  "status": "completed",
+  "global_step": 1000,
+  "epoch": 3.0,
+  "best_metric": 0.92,
+  "best_model_checkpoint": "saves/.../checkpoint-500",
+  "output_dir": "saves/qwen3-4b/lora/sft_20260702_1430",
+  "run_name": "qwen3-4b_lora_20260702_1430",
+  "timestamp": 1751456789.123,
+  "latest_log": {"loss": 0.05, "learning_rate": 5e-05, "epoch": 3.0}
+}
+```
+
+若设置了 `webhook_secret`，请求头将附带 `X-Webhook-Signature: sha256=<hmac_hex>` 以便接收端校验。
+
+> Webhook 在后台线程发送，不阻塞训练循环。发送失败仅记录 warning，不影响训练。
+
 ## 使用了 LLaMA Factory 的项目
 
 如果您有项目希望添加至下述列表，请通过邮件联系或者创建一个 PR。

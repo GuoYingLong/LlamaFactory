@@ -812,6 +812,54 @@ When launching training tasks, you can log in to SwanLab in three ways:
 2. Set the environment variable `SWANLAB_API_KEY` to your [API key](https://swanlab.cn/settings).
 3. Use the `swanlab login` command to complete the login.
 
+### Use HTTP Webhook Callback
+
+To receive real-time training status via HTTP webhook (e.g., notify your CI/CD pipeline, chatbot, or monitoring system), add the following arguments to yaml files.
+
+```yaml
+webhook_url: "https://your-server.com/api/training-callback"
+webhook_events: ["on_train_end"]  # default: ["on_train_end"]
+webhook_secret: null              # optional HMAC-SHA256 signing key
+```
+
+**Available events:**
+
+| Event | Fires when |
+|---|---|
+| `on_train_begin` | Training starts |
+| `on_epoch_end` | Each epoch ends |
+| `on_step_end` | Each step ends |
+| `on_log` | Logging step (controlled by `logging_steps`) |
+| `on_save` | Checkpoint is saved |
+| `on_evaluate` | Evaluation ends |
+| `on_train_end` | Training ends (default) |
+
+At `on_train_end`, the JSON payload includes a `status` field:
+
+- `"completed"` — training finished normally (has `train_runtime` in log history).
+- `"interrupted"` — training was stopped by exception, `Ctrl+C`, or `SIGTERM` (no `train_runtime`).
+
+Example payload:
+
+```json
+{
+  "event": "on_train_end",
+  "status": "completed",
+  "global_step": 1000,
+  "epoch": 3.0,
+  "best_metric": 0.92,
+  "best_model_checkpoint": "saves/.../checkpoint-500",
+  "output_dir": "saves/qwen3-4b/lora/sft_20260702_1430",
+  "run_name": "qwen3-4b_lora_20260702_1430",
+  "timestamp": 1751456789.123,
+  "latest_log": {"loss": 0.05, "learning_rate": 5e-05, "epoch": 3.0}
+}
+```
+
+If `webhook_secret` is set, the request includes `X-Webhook-Signature: sha256=<hmac_hex>` for server-side verification.
+
+> The webhook runs in a background thread and never blocks the training loop. A failed POST only logs a warning — it will not affect training.
+
 ## Projects using LLaMA Factory
 
 If you have a project that should be incorporated, please contact via email or create a pull request.

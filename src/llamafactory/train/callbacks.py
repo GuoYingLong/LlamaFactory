@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import fnmatch
+import hashlib
+import hmac
 import json
 import os
 import signal
@@ -20,7 +22,7 @@ import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -626,3 +628,121 @@ class ModuleProfilerCallback(TrainerCallback):
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
+
+
+class HttpWebhookCallback(TrainerCallback):
+    r"""A callback for reporting training status to an HTTP webhook URL.
+
+    Sends POST requests with JSON payload on configured training events.
+    Uses a background thread so the training loop is never blocked.
+
+    Usage in YAML config:
+        webhook_url: "https://your-server.com/api/training-callback"
+        webhook_events: ["on_train_end", "on_log"]
+        webhook_secret: null  # optional HMAC-SHA256 signing key
+
+    All valid event names:
+        on_train_begin, on_epoch_end, on_step_end, on_log,
+        on_save, on_evaluate, on_train_end.
+    """
+
+    VALID_EVENTS: frozenset[str] = frozenset(
+        {
+            "on_train_begin",
+            "on_epoch_end",
+            "on_step_end",
+            "on_log",
+            "on_save",
+            "on_evaluate",
+            "on_train_end",
+        }
+    )
+
+    def __init__(self, webhook_url: str, webhook_events: list[str], webhook_secret: Optional[str] = None) -> None:
+        self.webhook_url = webhook_url
+        self.webhook_events: set[str] = set(webhook_events)
+        self.webhook_secret = webhook_secret
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="webhook")
+
+        unknown_events = self.webhook_events - self.VALID_EVENTS
+        if unknown_events:
+            logger.warning_rank0(f"Unknown webhook events ignored: {sorted(unknown_events)}. Valid: {sorted(self.VALID_EVENTS)}")
+
+    @staticmethod
+    def _has_completed(state: "TrainerState") -> bool:
+        r"""Check whether training completed normally by looking for ``train_runtime`` in log history."""
+        return any("train_runtime" in entry for entry in state.log_history)
+
+    def _build_payload(self, event: str, args: "TrainingArguments", state: "TrainerState", status: Optional[str] = None) -> dict[str, Any]:
+        r"""Construct the JSON payload for a training event."""
+        payload: dict[str, Any] = {
+            "event": event,
+            "global_step": state.global_step,
+            "epoch": state.epoch,
+            "best_metric": state.best_metric,
+            "best_model_checkpoint": state.best_model_checkpoint,
+            "output_dir": args.output_dir,
+            "run_name": args.run_name,
+            "timestamp": time.time(),
+        }
+        if status is not None:
+            payload["status"] = status
+        if state.log_history:
+            payload["latest_log"] = state.log_history[-1]
+        return payload
+
+    def _post_webhook(self, event: str, args: "TrainingArguments", state: "TrainerState", status: Optional[str] = None) -> None:
+        r"""Send a single webhook POST request (called from background thread)."""
+        import urllib.error
+        import urllib.request
+
+        payload = self._build_payload(event, args, state, status=status)
+        data = json.dumps(payload).encode("utf-8")
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+
+        if self.webhook_secret:
+            signature = hmac.new(
+                self.webhook_secret.encode("utf-8"), data, hashlib.sha256
+            ).hexdigest()
+            headers["X-Webhook-Signature"] = f"sha256={signature}"
+
+        req = urllib.request.Request(self.webhook_url, data=data, headers=headers, method="POST")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as exc:
+            logger.warning_rank0(f"Webhook POST to {self.webhook_url} failed: {exc}")
+
+    def _maybe_post(self, event: str, args: "TrainingArguments", state: "TrainerState", status: Optional[str] = None) -> None:
+        r"""Submit the event to the background thread if it is configured."""
+        if event in self.webhook_events:
+            self._executor.submit(self._post_webhook, event, args, state, status)
+
+    @override
+    def on_train_begin(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_train_begin", args, state)
+
+    @override
+    def on_epoch_end(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_epoch_end", args, state)
+
+    @override
+    def on_step_end(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_step_end", args, state)
+
+    @override
+    def on_log(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_log", args, state)
+
+    @override
+    def on_save(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_save", args, state)
+
+    @override
+    def on_evaluate(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        self._maybe_post("on_evaluate", args, state)
+
+    @override
+    def on_train_end(self, args: "TrainingArguments", state: "TrainerState", control: "TrainerControl", **kwargs):
+        status = "completed" if self._has_completed(state) else "interrupted"
+        self._maybe_post("on_train_end", args, state, status=status)
+        self._executor.shutdown(wait=True)
